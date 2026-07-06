@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { fetchMaude, type SearchParams } from "@/lib/fda";
+import { fetchMaude, OpenFdaError, type SearchParams } from "@/lib/fda";
 import { computeAnalytics } from "@/lib/analytics";
 
 export const runtime = "nodejs";
@@ -52,6 +52,9 @@ export async function POST(req: Request) {
       query: result.query,
     });
   } catch (err) {
+    if (err instanceof OpenFdaError && err.rateLimited) {
+      return NextResponse.json({ error: err.message }, { status: 429 });
+    }
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json(
       { error: `Error querying FDA openFDA API: ${message}` },

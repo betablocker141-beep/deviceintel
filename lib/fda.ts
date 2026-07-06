@@ -164,9 +164,20 @@ function buildUrl(
   for (const [k, v] of Object.entries(extra)) {
     url += `&${k}=${v}`;
   }
-  const key = apiKey || process.env.FDA_API_KEY;
+  const key = (apiKey || process.env.FDA_API_KEY || "").trim();
   if (key) url += `&api_key=${key}`;
   return url;
+}
+
+export class OpenFdaError extends Error {
+  status: number;
+  rateLimited: boolean;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "OpenFdaError";
+    this.status = status;
+    this.rateLimited = status === 429;
+  }
 }
 
 function extractNextUrl(res: Response): string | null {
@@ -205,14 +216,23 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Lightweight count-only query. */
+const RATE_LIMIT_MSG =
+  "The openFDA API is rate-limiting requests. Add a free FDA API key (Advanced filters, or the FDA_API_KEY environment variable) to raise the limit.";
+
+/** Lightweight count-only query. Returns total match count. */
 export async function fetchTotal(
   search: string,
   apiKey?: string,
 ): Promise<number> {
   const url = buildUrl(search, { limit: 1 }, apiKey);
   const res = await fetchWithRetry(url);
-  if (!res || res.status !== 200) return 0;
+  if (!res) throw new OpenFdaError(0, "Could not reach the openFDA API.");
+  if (res.status === 404) return 0; // genuine zero-match result
+  if (res.status === 429) throw new OpenFdaError(429, RATE_LIMIT_MSG);
+  if (res.status !== 200) {
+    const body = await res.text().catch(() => "");
+    throw new OpenFdaError(res.status, `openFDA API error (HTTP ${res.status}). ${body.slice(0, 160)}`);
+  }
   const data = await res.json();
   return data?.meta?.results?.total ?? 0;
 }
@@ -238,6 +258,10 @@ export async function fetchMaude(params: SearchParams): Promise<FetchResult> {
 
   while (nextUrl && events.length < maxRecords) {
     const res: Response | null = await fetchWithRetry(nextUrl);
+    // Surface rate-limiting on the first page rather than returning "no results".
+    if (res && res.status === 429 && events.length === 0) {
+      throw new OpenFdaError(429, RATE_LIMIT_MSG);
+    }
     if (!res || res.status !== 200) break;
 
     const data = await res.json();
